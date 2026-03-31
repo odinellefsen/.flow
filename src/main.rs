@@ -1,105 +1,98 @@
-use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAGIC: &[u8; 4] = b"FLOW";
-const VERSION: u16 = 1;
+use dotflow::recovery;
+use dotflow::{FlowReader, FlowWriter};
 
-fn write_flow(path: &str, records: &[String]) -> io::Result<()> {
-    let mut file = File::create(path)?;
+const PATH: &str = "demo.flow";
 
-    // Write magic bytes: identifies the file type
-    file.write_all(MAGIC)?;
+const EVENT_USER_CREATED: u16 = 0;
+const EVENT_EMAIL_UPDATED: u16 = 1;
+const EVENT_USER_DELETED: u16 = 2;
 
-    // Write version number
-    file.write_all(&VERSION.to_le_bytes())?;
-
-    // Write number of records
-    let count = records.len() as u32;
-    file.write_all(&count.to_le_bytes())?;
-
-    // Write each record
-    for record in records {
-        let bytes = record.as_bytes();
-        let len = bytes.len() as u32;
-
-        // First write the length of the string
-        file.write_all(&len.to_le_bytes())?;
-
-        // Then write the string bytes
-        file.write_all(bytes)?;
-    }
-
-    Ok(())
-}
-
-fn read_flow(path: &str) -> io::Result<Vec<String>> {
-    let mut file = File::open(path)?;
-
-    // Read and validate magic bytes
-    let mut magic = [0u8; 4];
-    file.read_exact(&mut magic)?;
-    if &magic != MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Invalid .flow file: bad magic bytes",
-        ));
-    }
-
-    // Read version
-    let mut version_bytes = [0u8; 2];
-    file.read_exact(&mut version_bytes)?;
-    let version = u16::from_le_bytes(version_bytes);
-
-    if version != VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("Unsupported .flow version: {}", version),
-        ));
-    }
-
-    // Read record count
-    let mut count_bytes = [0u8; 4];
-    file.read_exact(&mut count_bytes)?;
-    let count = u32::from_le_bytes(count_bytes);
-
-    let mut records = Vec::new();
-
-    for _ in 0..count {
-        // Read string length
-        let mut len_bytes = [0u8; 4];
-        file.read_exact(&mut len_bytes)?;
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        // Read string bytes
-        let mut buffer = vec![0u8; len];
-        file.read_exact(&mut buffer)?;
-
-        // Convert bytes to String
-        let record = String::from_utf8(buffer)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid UTF-8 in record"))?;
-
-        records.push(record);
-    }
-
-    Ok(records)
+fn now_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
 }
 
 fn main() -> io::Result<()> {
-    let records = vec![
-        "apple".to_string(),
-        "banana".to_string(),
-        "carrot".to_string(),
-    ];
+    // --- Write ---
+    println!("=== Writing events ===");
+    let mut writer = FlowWriter::create(PATH, 3, 4)?;
 
-    write_flow("data.flow", &records)?;
-    println!("Wrote data.flow");
+    let s0 = writer.append(EVENT_USER_CREATED, now_nanos(), b"alice".to_vec())?;
+    writer.append(EVENT_EMAIL_UPDATED, now_nanos(), b"alice@new.com".to_vec())?;
+    writer.append(EVENT_USER_CREATED, now_nanos(), b"bob".to_vec())?;
+    writer.append(EVENT_USER_DELETED, now_nanos(), b"alice".to_vec())?;
+    // block_size=4, so the above 4 events auto-flush as block 1
 
-    let loaded = read_flow("data.flow")?;
-    println!("Read from data.flow:");
+    writer.append(EVENT_USER_CREATED, now_nanos(), b"charlie".to_vec())?;
+    let s5 = writer.append(EVENT_EMAIL_UPDATED, now_nanos(), b"bob@new.com".to_vec())?;
+    writer.flush()?; // explicit flush for the remaining 2 events as block 2
 
-    for record in loaded {
-        println!("- {}", record);
+    println!("Wrote 6 events (seq {s0}..{s5})");
+
+    drop(writer);
+
+    // --- Read all ---
+    println!("\n=== Reading all events ===");
+    let reader = FlowReader::open(PATH)?;
+    for result in reader.into_iter() {
+        let event = result?;
+        let payload = String::from_utf8_lossy(&event.payload);
+        println!(
+            "  seq={} type={} payload={:?}",
+            event.sequence, event.event_type_id, payload
+        );
     }
+
+    // --- Filtered read (only user.created events) ---
+    println!("\n=== Filtered read: only EVENT_USER_CREATED (type 0) ===");
+    let reader = FlowReader::open(PATH)?.with_filter(&[EVENT_USER_CREATED]);
+    for result in reader.into_iter() {
+        let event = result?;
+        let payload = String::from_utf8_lossy(&event.payload);
+        println!(
+            "  seq={} type={} payload={:?}",
+            event.sequence, event.event_type_id, payload
+        );
+    }
+
+    // --- Recovery info ---
+    println!("\n=== Recovery validation ===");
+    let prefix = recovery::validate_file(PATH)?;
+    println!("  Valid blocks: {}", prefix.block_count);
+    println!("  Valid events: {}", prefix.event_count);
+    println!("  Next sequence: {}", prefix.next_sequence);
+    println!("  Valid end byte: {}", prefix.valid_end);
+
+    // --- Reopen and append ---
+    println!("\n=== Reopen and append ===");
+    let mut writer = FlowWriter::open(PATH, 4)?;
+    let s6 = writer.append(
+        EVENT_EMAIL_UPDATED,
+        now_nanos(),
+        b"charlie@new.com".to_vec(),
+    )?;
+    writer.flush()?;
+    println!("Appended 1 more event (seq {s6})");
+    drop(writer);
+
+    println!("\n=== Reading all events after reopen ===");
+    let reader = FlowReader::open(PATH)?;
+    let mut count = 0;
+    for result in reader.into_iter() {
+        let event = result?;
+        let payload = String::from_utf8_lossy(&event.payload);
+        println!(
+            "  seq={} type={} payload={:?}",
+            event.sequence, event.event_type_id, payload
+        );
+        count += 1;
+    }
+    println!("Total events: {count}");
 
     Ok(())
 }
