@@ -1,0 +1,40 @@
+{
+  "flow_type": "user.v0",
+  "version": 1,
+  "event_type_count": 3,
+  "bucket_duration_ms": 3600000,
+  "segments": [
+    {
+      "file": "1743292800000.flow",
+      "bucket_start_ms": 1743292800000,
+      "start_sequence": 0,
+      "end_sequence": 24999,
+      "event_count": 25000,
+      "byte_size": 1456200
+    },
+    {
+      "file": "1743296400000.flow",
+      "bucket_start_ms": 1743296400000,
+      "start_sequence": 25000,
+      "end_sequence": 49999,
+      "event_count": 25000,
+      "byte_size": 1462866
+    },
+    {
+      "file": "1743300000000.flow",
+      "bucket_start_ms": 1743300000000,
+      "start_sequence": 50000,
+      "end_sequence": 74999,
+      "event_count": 25000,
+      "byte_size": 1462866
+    },
+    {
+      "file": "1743303600000.flow",
+      "bucket_start_ms": 1743303600000,
+      "start_sequence": 75000,
+      "end_sequence": 99999,
+      "event_count": 25000,
+      "byte_size": 1462866
+    }
+  ]
+}
