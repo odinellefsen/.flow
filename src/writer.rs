@@ -18,6 +18,16 @@ pub struct FlowWriter {
 impl FlowWriter {
     /// Create a new `.flow` file and write the file header.
     pub fn create(path: &str, event_type_count: u16, block_size: usize) -> io::Result<Self> {
+        Self::create_at_sequence(path, event_type_count, block_size, 0)
+    }
+
+    /// Create a new `.flow` file starting at the given sequence number.
+    pub fn create_at_sequence(
+        path: &str,
+        event_type_count: u16,
+        block_size: usize,
+        start_sequence: u64,
+    ) -> io::Result<Self> {
         let mut file = File::create(path)?;
         let header = format::encode_file_header(event_type_count);
         file.write_all(&header)?;
@@ -26,7 +36,7 @@ impl FlowWriter {
         Ok(Self {
             file,
             buffer: Vec::with_capacity(block_size),
-            next_sequence: 0,
+            next_sequence: start_sequence,
             block_size,
             event_type_count,
         })
@@ -55,6 +65,14 @@ impl FlowWriter {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         Ok(writer)
+    }
+
+    pub fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+
+    pub fn buffered_count(&self) -> usize {
+        self.buffer.len()
     }
 
     /// Append an event to the in-memory buffer.
