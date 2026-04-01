@@ -3,5 +3,17 @@ name = "dotflow"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "dotflow"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate"
+path = "src/bin/generate.rs"
+
+[[bin]]
+name = "replay"
+path = "src/bin/replay.rs"
+
 [dependencies]
 crc32c = "0.6.8"
