@@ -31,7 +31,6 @@ impl FlowWriter {
         let mut file = File::create(path)?;
         let header = format::encode_file_header(event_type_count);
         file.write_all(&header)?;
-        file.sync_data()?;
 
         Ok(Self {
             file,
@@ -101,7 +100,7 @@ impl FlowWriter {
         Ok(seq)
     }
 
-    /// Flush all buffered events as a single block, then fsync.
+    /// Flush all buffered events as a single block to the OS page cache.
     /// No-op if the buffer is empty.
     pub fn flush(&mut self) -> io::Result<()> {
         if self.buffer.is_empty() {
@@ -124,7 +123,6 @@ impl FlowWriter {
 
         self.file.write_all(&header.encode())?;
         self.file.write_all(&data_buf)?;
-        self.file.sync_data()?;
 
         self.buffer.clear();
 
