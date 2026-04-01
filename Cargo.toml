@@ -15,6 +15,10 @@ path = "src/bin/generate.rs"
 name = "replay"
 path = "src/bin/replay.rs"
 
+[[bin]]
+name = "benchmark"
+path = "src/bin/benchmark.rs"
+
 [dependencies]
 crc32c = "0.6.8"
 serde = { version = "1.0.228", features = ["derive"] }
