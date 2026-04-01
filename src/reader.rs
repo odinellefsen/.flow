@@ -63,6 +63,58 @@ pub struct FlowIterator {
 }
 
 impl FlowIterator {
+    /// Skip forward past all events with sequence <= `last_sequence`.
+    /// Uses block headers to skip entire blocks when possible.
+    pub fn skip_to_after(&mut self, last_sequence: u64) -> io::Result<()> {
+        loop {
+            if self.finished {
+                return Ok(());
+            }
+
+            if self.block_remaining == 0 {
+                let mut hdr_buf = [0u8; BLOCK_HEADER_SIZE];
+                match self.reader.read_exact(&mut hdr_buf) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                        self.finished = true;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                }
+
+                let header = BlockHeader::decode(&hdr_buf);
+
+                if header.end_sequence <= last_sequence {
+                    self.reader
+                        .seek(SeekFrom::Current(header.data_size as i64))?;
+                    continue;
+                }
+
+                self.block_data.resize(header.data_size as usize, 0);
+                self.reader.read_exact(&mut self.block_data)?;
+                self.block_offset = 0;
+                self.block_remaining = header.event_count;
+            }
+
+            while self.block_remaining > 0 {
+                let data = &self.block_data[self.block_offset..];
+                match EventRecord::decode(data) {
+                    Ok((record, consumed)) => {
+                        if record.sequence <= last_sequence {
+                            self.block_offset += consumed;
+                            self.block_remaining -= 1;
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+                    }
+                }
+            }
+        }
+    }
+
     fn load_next_block(&mut self) -> io::Result<Option<BlockHeader>> {
         let mut hdr_buf = [0u8; BLOCK_HEADER_SIZE];
         match self.reader.read_exact(&mut hdr_buf) {
