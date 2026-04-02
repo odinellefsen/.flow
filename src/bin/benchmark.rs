@@ -2,6 +2,7 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::time::Instant;
 
+use dotflow::event::EventRecord;
 use dotflow::{FlowReader, FlowWriter};
 
 const EVENT_COUNT: u64 = 100_000;
@@ -25,7 +26,7 @@ fn main() -> io::Result<()> {
             let event_type = (i % 3) as u16;
             let name = names[(i as usize) % names.len()];
             let payload = format!(r#"{{"user":"{}","id":{},"action":"test"}}"#, name, i);
-            writer.append(event_type, i * 1_000_000, payload.into_bytes())?;
+            writer.append(EventRecord::new(event_type, i * 1_000_000, payload.into_bytes()))?;
         }
         writer.flush()?;
     }

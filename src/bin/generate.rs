@@ -1,6 +1,7 @@
 use std::io;
 use std::time::Instant;
 
+use dotflow::event::EventRecord;
 use dotflow::SegmentedWriter;
 
 const DIR: &str = "benchmark.flowtype";
@@ -54,7 +55,7 @@ fn main() -> io::Result<()> {
             _ => unreachable!(),
         };
 
-        writer.append(event_type, timestamp, payload.into_bytes())?;
+        writer.append(EventRecord::new(event_type, timestamp, payload.into_bytes()))?;
     }
 
     writer.flush()?;
