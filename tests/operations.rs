@@ -3,7 +3,8 @@ use std::fs;
 use dotflow::operations::{
     delete_flow_type, purge_event_type, truncate_event_type, truncate_flow_type,
 };
-use dotflow::{EventRecord, SegmentedReader, SegmentedWriter};
+use dotflow::event::EventRecord;
+use dotflow::{SegmentedReader, SegmentedWriter};
 
 const HOUR_MS: u64 = 3_600_000;
 const HOUR_NS: u64 = 3_600_000_000_000;
@@ -26,8 +27,8 @@ fn write_events(dir: &str, event_count: u64, hours: u64) {
     for hour in 0..hours {
         for j in 0..event_count / hours {
             let event_type = (j % 3) as u16;
-            w.append(event_type, ts(hour, j), format!("h{hour}e{j}t{event_type}").into_bytes())
-                .unwrap();
+            let payload = format!("h{hour}e{j}t{event_type}").into_bytes();
+            w.append(EventRecord::new(event_type, ts(hour, j), payload)).unwrap();
         }
     }
     w.flush().unwrap();
@@ -220,7 +221,7 @@ fn purge_can_empty_a_segment() {
     {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 1, HOUR_MS, 50).unwrap();
         for j in 0..10u64 {
-            w.append(0, ts(0, j), b"data".to_vec()).unwrap();
+            w.append(EventRecord::new(0, ts(0, j), b"data".to_vec())).unwrap();
         }
         w.flush().unwrap();
     }
