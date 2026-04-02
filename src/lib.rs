@@ -14,7 +14,7 @@ pub use block::BlockHeader;
 pub use writer::FlowWriter;
 pub use reader::FlowReader;
 pub use recovery::ValidPrefix;
-pub use store::{FlowStore, Cursor, Manifest, SegmentInfo};
+pub use store::{FlowStore, Cursor, EventTypeInfo, Manifest, SegmentInfo};
 pub use segmented_writer::SegmentedWriter;
 pub use segmented_reader::SegmentedReader;
 pub use operations::PurgeStats;
