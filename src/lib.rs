@@ -7,6 +7,7 @@ pub mod recovery;
 pub mod store;
 pub mod segmented_writer;
 pub mod segmented_reader;
+pub mod operations;
 
 pub use event::EventRecord;
 pub use block::BlockHeader;
@@ -16,3 +17,4 @@ pub use recovery::ValidPrefix;
 pub use store::{FlowStore, Cursor, Manifest, SegmentInfo};
 pub use segmented_writer::SegmentedWriter;
 pub use segmented_reader::SegmentedReader;
+pub use operations::PurgeStats;
