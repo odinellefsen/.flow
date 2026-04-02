@@ -5,8 +5,13 @@ pub const FILE_HEADER_SIZE: usize = 16;
 pub const BLOCK_HEADER_SIZE: usize = 64;
 pub const BITSET_SIZE: usize = 32;
 
-/// Minimum event record size: u64 seq(8) + u16 type(2) + u64 ts(8) + u32 len(4) + u32 crc(4) = 26 bytes
-pub const EVENT_RECORD_MIN_SIZE: usize = 26;
+/// Minimum event record size (no optional IDs, no metadata, empty payload):
+/// seq(8) + event_id(16) + type(2) + event_time(8) + valid_time(8) +
+/// recorded_time(8) + flags(1) + metadata_count(2) + payload_len(4) + crc(4) = 61
+pub const EVENT_RECORD_MIN_SIZE: usize = 61;
+
+pub const FLAG_HAS_CORRELATION_ID: u8 = 1 << 0;
+pub const FLAG_HAS_CAUSATION_ID: u8 = 1 << 1;
 
 pub fn crc32c(data: &[u8]) -> u32 {
     crc32c::crc32c(data)
