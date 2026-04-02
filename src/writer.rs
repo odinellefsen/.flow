@@ -16,12 +16,10 @@ pub struct FlowWriter {
 }
 
 impl FlowWriter {
-    /// Create a new `.flow` file and write the file header.
     pub fn create(path: &str, event_type_count: u16, block_size: usize) -> io::Result<Self> {
         Self::create_at_sequence(path, event_type_count, block_size, 0)
     }
 
-    /// Create a new `.flow` file starting at the given sequence number.
     pub fn create_at_sequence(
         path: &str,
         event_type_count: u16,
@@ -41,8 +39,6 @@ impl FlowWriter {
         })
     }
 
-    /// Open an existing `.flow` file for appending.
-    /// Runs crash recovery: validates prefix and truncates any partial tail.
     pub fn open(path: &str, block_size: usize) -> io::Result<Self> {
         let valid = recovery::validate_file(path)?;
 
@@ -57,7 +53,6 @@ impl FlowWriter {
             event_type_count: valid.event_type_count,
         };
 
-        // Seek to end for appending
         writer
             .file
             .seek(io::SeekFrom::End(0))
@@ -74,24 +69,14 @@ impl FlowWriter {
         self.buffer.len()
     }
 
-    /// Append an event to the in-memory buffer.
-    /// Automatically flushes when the buffer reaches `block_size`.
-    /// Returns the assigned sequence number.
-    pub fn append(
-        &mut self,
-        event_type_id: u16,
-        timestamp: u64,
-        payload: Vec<u8>,
-    ) -> io::Result<u64> {
+    /// Append an event. The sequence field is overwritten with the next
+    /// monotonic sequence number; all other fields are stored as-is.
+    pub fn append(&mut self, mut event: EventRecord) -> io::Result<u64> {
         let seq = self.next_sequence;
         self.next_sequence += 1;
+        event.sequence = seq;
 
-        self.buffer.push(EventRecord {
-            sequence: seq,
-            event_type_id,
-            timestamp,
-            payload,
-        });
+        self.buffer.push(event);
 
         if self.buffer.len() >= self.block_size {
             self.flush()?;
@@ -100,7 +85,7 @@ impl FlowWriter {
         Ok(seq)
     }
 
-    /// Flush all buffered events as a single block to the OS page cache.
+    /// Flush buffered events as a single block to the OS page cache.
     /// No-op if the buffer is empty.
     pub fn flush(&mut self) -> io::Result<()> {
         if self.buffer.is_empty() {
