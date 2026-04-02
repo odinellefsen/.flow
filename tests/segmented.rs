@@ -1,6 +1,7 @@
 use std::fs;
 
-use dotflow::{Cursor, EventRecord, FlowStore, SegmentedReader, SegmentedWriter};
+use dotflow::event::EventRecord;
+use dotflow::{Cursor, FlowStore, SegmentedReader, SegmentedWriter};
 
 const HOUR_MS: u64 = 3_600_000;
 const HOUR_NS: u64 = 3_600_000_000_000;
@@ -18,6 +19,10 @@ fn ts(hour: u64, offset_within_hour: u64) -> u64 {
     BASE_NS + hour * HOUR_NS + offset_within_hour * 1_000_000_000
 }
 
+fn ev(event_type_id: u16, event_time: u64, payload: &str) -> EventRecord {
+    EventRecord::new(event_type_id, event_time, payload.as_bytes().to_vec())
+}
+
 // -- Segment rotation --
 
 #[test]
@@ -28,7 +33,7 @@ fn single_segment_write_read() {
     {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 2, HOUR_MS, 100).unwrap();
         for i in 0u64..10 {
-            w.append((i % 2) as u16, ts(0, i), format!("e{i}").into_bytes())
+            w.append(ev((i % 2) as u16, ts(0, i), &format!("e{i}")))
                 .unwrap();
         }
         w.flush().unwrap();
@@ -56,10 +61,9 @@ fn multiple_segments_rotation() {
 
     {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 2, HOUR_MS, 100).unwrap();
-        // Write events across 3 hourly buckets
         for hour in 0..3u64 {
             for j in 0..5u64 {
-                w.append(0, ts(hour, j), format!("h{hour}e{j}").into_bytes())
+                w.append(ev(0, ts(hour, j), &format!("h{hour}e{j}")))
                     .unwrap();
             }
         }
@@ -69,7 +73,6 @@ fn multiple_segments_rotation() {
     let store = FlowStore::open(&dir).unwrap();
     assert_eq!(store.manifest.segments.len(), 3);
 
-    // Sequences should be globally monotonic
     assert_eq!(store.manifest.segments[0].start_sequence, 0);
     assert_eq!(store.manifest.segments[0].end_sequence, 4);
     assert_eq!(store.manifest.segments[1].start_sequence, 5);
@@ -97,7 +100,7 @@ fn segment_files_match_manifest() {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 1, HOUR_MS, 50).unwrap();
         for hour in 0..3u64 {
             for j in 0..20u64 {
-                w.append(0, ts(hour, j), vec![0u8; 10]).unwrap();
+                w.append(ev(0, ts(hour, j), "x")).unwrap();
             }
         }
         w.flush().unwrap();
@@ -126,7 +129,7 @@ fn cross_segment_read_preserves_order() {
         for i in 0..100u64 {
             let hour = i / 25;
             let offset = i % 25;
-            w.append((i % 3) as u16, ts(hour, offset), format!("{i}").into_bytes())
+            w.append(ev((i % 3) as u16, ts(hour, offset), &format!("{i}")))
                 .unwrap();
         }
         w.flush().unwrap();
@@ -160,18 +163,16 @@ fn filtered_read_across_segments() {
         for i in 0..60u64 {
             let hour = i / 20;
             let offset = i % 20;
-            w.append((i % 3) as u16, ts(hour, offset), format!("{i}").into_bytes())
+            w.append(ev((i % 3) as u16, ts(hour, offset), &format!("{i}")))
                 .unwrap();
         }
         w.flush().unwrap();
     }
 
-    // Filter for type 1 only
     let reader = SegmentedReader::open(&dir).unwrap().with_filter(&[1]);
     let events: Vec<(EventRecord, Cursor)> =
         reader.into_iter().map(|r| r.unwrap()).collect();
 
-    // Type 1 events: i % 3 == 1 -> indices 1,4,7,10,13,16,19,22,... -> 20 total
     assert_eq!(events.len(), 20);
     for (ev, _) in &events {
         assert_eq!(ev.event_type_id, 1);
@@ -190,7 +191,7 @@ fn cursor_resume_mid_segment() {
     {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 1, HOUR_MS, 50).unwrap();
         for i in 0..50u64 {
-            w.append(0, ts(0, i), format!("{i}").into_bytes()).unwrap();
+            w.append(ev(0, ts(0, i), &format!("{i}"))).unwrap();
         }
         w.flush().unwrap();
     }
@@ -198,7 +199,6 @@ fn cursor_resume_mid_segment() {
     let store = FlowStore::open(&dir).unwrap();
     let bucket = store.manifest.segments[0].bucket_start_ms;
 
-    // Resume after sequence 25
     let cursor = Cursor {
         segment_bucket_ms: bucket,
         sequence: 25,
@@ -224,7 +224,7 @@ fn cursor_resume_across_segments() {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 1, HOUR_MS, 50).unwrap();
         for hour in 0..3u64 {
             for j in 0..20u64 {
-                w.append(0, ts(hour, j), format!("h{hour}e{j}").into_bytes())
+                w.append(ev(0, ts(hour, j), &format!("h{hour}e{j}")))
                     .unwrap();
             }
         }
@@ -234,7 +234,6 @@ fn cursor_resume_across_segments() {
     let store = FlowStore::open(&dir).unwrap();
     let seg1_bucket = store.manifest.segments[0].bucket_start_ms;
 
-    // Resume from end of first segment (seq 19), should get all of seg 1 and 2
     let cursor = Cursor {
         segment_bucket_ms: seg1_bucket,
         sequence: 19,
@@ -244,7 +243,6 @@ fn cursor_resume_across_segments() {
     let events: Vec<(EventRecord, Cursor)> =
         reader.into_iter().map(|r| r.unwrap()).collect();
 
-    // Segments 1 and 2 have sequences 20-39 and 40-59
     assert_eq!(events.len(), 40);
     assert_eq!(events[0].0.sequence, 20);
     assert_eq!(events[events.len() - 1].0.sequence, 59);
@@ -262,7 +260,7 @@ fn cursor_resume_with_filter() {
         for i in 0..60u64 {
             let hour = i / 20;
             let offset = i % 20;
-            w.append((i % 3) as u16, ts(hour, offset), format!("{i}").into_bytes())
+            w.append(ev((i % 3) as u16, ts(hour, offset), &format!("{i}")))
                 .unwrap();
         }
         w.flush().unwrap();
@@ -271,7 +269,6 @@ fn cursor_resume_with_filter() {
     let store = FlowStore::open(&dir).unwrap();
     let seg1_bucket = store.manifest.segments[1].bucket_start_ms;
 
-    // Resume from seg 1, seq 30, filter for type 0
     let cursor = Cursor {
         segment_bucket_ms: seg1_bucket,
         sequence: 30,
@@ -303,7 +300,7 @@ fn manifest_survives_reopen() {
         let mut w = SegmentedWriter::create(&dir, "persist.v0", 2, HOUR_MS, 50).unwrap();
         for hour in 0..2u64 {
             for j in 0..10u64 {
-                w.append(j as u16 % 2, ts(hour, j), vec![1u8; 5]).unwrap();
+                w.append(ev(j as u16 % 2, ts(hour, j), "x")).unwrap();
             }
         }
         w.flush().unwrap();
@@ -327,23 +324,19 @@ fn reopen_and_append() {
     {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 1, HOUR_MS, 50).unwrap();
         for i in 0..10u64 {
-            w.append(0, ts(0, i), format!("first-{i}").into_bytes())
-                .unwrap();
+            w.append(ev(0, ts(0, i), &format!("first-{i}"))).unwrap();
         }
         w.flush().unwrap();
     }
 
     {
         let mut w = SegmentedWriter::open(&dir, 50).unwrap();
-        // Append to the same segment
         for i in 0..5u64 {
-            w.append(0, ts(0, 10 + i), format!("second-{i}").into_bytes())
+            w.append(ev(0, ts(0, 10 + i), &format!("second-{i}")))
                 .unwrap();
         }
-        // And to a new segment
         for i in 0..5u64 {
-            w.append(0, ts(1, i), format!("third-{i}").into_bytes())
-                .unwrap();
+            w.append(ev(0, ts(1, i), &format!("third-{i}"))).unwrap();
         }
         w.flush().unwrap();
     }
@@ -373,7 +366,7 @@ fn segment_lookup_by_time() {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 1, HOUR_MS, 50).unwrap();
         for hour in 0..4u64 {
             for j in 0..10u64 {
-                w.append(0, ts(hour, j), vec![0u8; 5]).unwrap();
+                w.append(ev(0, ts(hour, j), "x")).unwrap();
             }
         }
         w.flush().unwrap();
@@ -381,14 +374,12 @@ fn segment_lookup_by_time() {
 
     let store = FlowStore::open(&dir).unwrap();
 
-    // Lookup by time in the middle of hour 2
     let base_ms = BASE_NS / 1_000_000;
     let target_ms = base_ms + 2 * HOUR_MS + 30 * 60_000; // 2.5 hours in
     let seg = store.segment_for_time_ms(target_ms).unwrap();
     assert_eq!(seg.start_sequence, 20);
     assert_eq!(seg.end_sequence, 29);
 
-    // Lookup at the exact start of hour 0
     let seg = store.segment_for_time_ms(base_ms).unwrap();
     assert_eq!(seg.start_sequence, 0);
 
@@ -406,7 +397,7 @@ fn cursor_values_track_position() {
         let mut w = SegmentedWriter::create(&dir, "test.v0", 1, HOUR_MS, 50).unwrap();
         for hour in 0..2u64 {
             for j in 0..5u64 {
-                w.append(0, ts(hour, j), vec![0u8; 5]).unwrap();
+                w.append(ev(0, ts(hour, j), "x")).unwrap();
             }
         }
         w.flush().unwrap();
@@ -420,16 +411,13 @@ fn cursor_values_track_position() {
     let events: Vec<(EventRecord, Cursor)> =
         reader.into_iter().map(|r| r.unwrap()).collect();
 
-    // First 5 events should have seg0 bucket
     for (_, cursor) in &events[..5] {
         assert_eq!(cursor.segment_bucket_ms, seg0_bucket);
     }
-    // Last 5 events should have seg1 bucket
     for (_, cursor) in &events[5..] {
         assert_eq!(cursor.segment_bucket_ms, seg1_bucket);
     }
 
-    // Sequence values match
     for (i, (ev, cursor)) in events.iter().enumerate() {
         assert_eq!(ev.sequence, i as u64);
         assert_eq!(cursor.sequence, i as u64);
@@ -453,6 +441,32 @@ fn empty_store_read() {
     let events: Vec<(EventRecord, Cursor)> =
         reader.into_iter().map(|r| r.unwrap()).collect();
     assert_eq!(events.len(), 0);
+
+    cleanup(&dir);
+}
+
+// -- Event type registry --
+
+#[test]
+fn event_type_registry_persists() {
+    let dir = test_dir("et_registry");
+    cleanup(&dir);
+
+    {
+        let _w = SegmentedWriter::create(&dir, "food-item.v0", 3, HOUR_MS, 50).unwrap();
+    }
+
+    let mut store = FlowStore::open(&dir).unwrap();
+    store.register_event_type(0, "food-item.created.v0");
+    store.register_event_type(1, "food-item.updated.v0");
+    store.register_event_type(2, "food-item.deleted.v0");
+    store.save_manifest().unwrap();
+
+    let store2 = FlowStore::open(&dir).unwrap();
+    assert_eq!(store2.event_type_name(0), Some("food-item.created.v0"));
+    assert_eq!(store2.event_type_name(1), Some("food-item.updated.v0"));
+    assert_eq!(store2.event_type_name(2), Some("food-item.deleted.v0"));
+    assert_eq!(store2.event_type_name(99), None);
 
     cleanup(&dir);
 }
