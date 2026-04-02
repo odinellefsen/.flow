@@ -5,11 +5,19 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventTypeInfo {
+    pub id: u16,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
     pub flow_type: String,
     pub version: u32,
     pub event_type_count: u16,
     pub bucket_duration_ms: u64,
+    #[serde(default)]
+    pub event_types: Vec<EventTypeInfo>,
     pub segments: Vec<SegmentInfo>,
 }
 
@@ -48,6 +56,7 @@ impl FlowStore {
             version: 1,
             event_type_count,
             bucket_duration_ms,
+            event_types: Vec::new(),
             segments: Vec::new(),
         };
 
@@ -58,6 +67,29 @@ impl FlowStore {
         store.save_manifest()?;
 
         Ok(store)
+    }
+
+    /// Register a human-readable name for an event type ID.
+    /// Overwrites if the ID already exists.
+    pub fn register_event_type(&mut self, id: u16, name: &str) {
+        if let Some(existing) = self.manifest.event_types.iter_mut().find(|e| e.id == id) {
+            existing.name = name.to_string();
+        } else {
+            self.manifest.event_types.push(EventTypeInfo {
+                id,
+                name: name.to_string(),
+            });
+            self.manifest.event_types.sort_by_key(|e| e.id);
+        }
+    }
+
+    /// Look up the name for an event type ID.
+    pub fn event_type_name(&self, id: u16) -> Option<&str> {
+        self.manifest
+            .event_types
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.name.as_str())
     }
 
     pub fn open(dir: &str) -> io::Result<Self> {
