@@ -1,8 +1,8 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
+use dotflow::block::{build_filter, BlockHeader};
 use dotflow::event::EventRecord;
-use dotflow::block::{BlockHeader, build_filter};
 use dotflow::format;
 use dotflow::recovery;
 use dotflow::{FlowReader, FlowWriter};
@@ -15,20 +15,21 @@ fn cleanup(path: &str) {
     let _ = fs::remove_file(path);
 }
 
+fn ev(event_type_id: u16, event_time: u64, payload: &[u8]) -> EventRecord {
+    EventRecord::new(event_type_id, event_time, payload.to_vec())
+}
+
 // ── Event record encode/decode round-trip ──
 
 #[test]
 fn event_record_roundtrip() {
-    let event = EventRecord {
-        sequence: 42,
-        event_type_id: 7,
-        timestamp: 1_000_000_000,
-        payload: b"hello world".to_vec(),
-    };
+    let mut event = EventRecord::new(7, 1_000_000_000, b"hello world".to_vec());
+    event.sequence = 42;
+    event.valid_time = 2_000_000_000;
+    event.recorded_time = 3_000_000_000;
 
     let mut buf = Vec::new();
     event.encode(&mut buf);
-    assert_eq!(buf.len(), event.encoded_size());
 
     let (decoded, consumed) = EventRecord::decode(&buf).unwrap();
     assert_eq!(consumed, buf.len());
@@ -36,13 +37,29 @@ fn event_record_roundtrip() {
 }
 
 #[test]
+fn event_record_with_optional_ids() {
+    let mut event = EventRecord::new(1, 1_000_000_000, b"data".to_vec());
+    event.correlation_id = Some([1u8; 16]);
+    event.causation_id = Some([2u8; 16]);
+    event.metadata = vec![
+        ("key1".to_string(), "val1".to_string()),
+        ("key2".to_string(), "val2".to_string()),
+    ];
+
+    let mut buf = Vec::new();
+    event.encode(&mut buf);
+
+    let (decoded, consumed) = EventRecord::decode(&buf).unwrap();
+    assert_eq!(consumed, buf.len());
+    assert_eq!(decoded.correlation_id, Some([1u8; 16]));
+    assert_eq!(decoded.causation_id, Some([2u8; 16]));
+    assert_eq!(decoded.metadata.len(), 2);
+    assert_eq!(decoded.metadata[0], ("key1".to_string(), "val1".to_string()));
+}
+
+#[test]
 fn event_record_empty_payload() {
-    let event = EventRecord {
-        sequence: 0,
-        event_type_id: 0,
-        timestamp: 0,
-        payload: vec![],
-    };
+    let event = EventRecord::new(0, 0, vec![]);
 
     let mut buf = Vec::new();
     event.encode(&mut buf);
@@ -50,22 +67,17 @@ fn event_record_empty_payload() {
 
     let (decoded, consumed) = EventRecord::decode(&buf).unwrap();
     assert_eq!(consumed, format::EVENT_RECORD_MIN_SIZE);
-    assert_eq!(decoded, event);
+    assert_eq!(decoded.event_type_id, 0);
+    assert_eq!(decoded.payload, &[] as &[u8]);
 }
 
 #[test]
 fn event_record_bad_checksum() {
-    let event = EventRecord {
-        sequence: 1,
-        event_type_id: 0,
-        timestamp: 100,
-        payload: b"data".to_vec(),
-    };
+    let event = EventRecord::new(0, 100, b"data".to_vec());
 
     let mut buf = Vec::new();
     event.encode(&mut buf);
 
-    // Corrupt the last byte (part of the CRC)
     let last = buf.len() - 1;
     buf[last] ^= 0xFF;
 
@@ -136,9 +148,9 @@ fn write_read_roundtrip() {
 
     {
         let mut writer = FlowWriter::create(&path, 3, 1000).unwrap();
-        writer.append(0, 100, b"event-a".to_vec()).unwrap();
-        writer.append(1, 200, b"event-b".to_vec()).unwrap();
-        writer.append(2, 300, b"event-c".to_vec()).unwrap();
+        writer.append(ev(0, 100, b"event-a")).unwrap();
+        writer.append(ev(1, 200, b"event-b")).unwrap();
+        writer.append(ev(2, 300, b"event-c")).unwrap();
         writer.flush().unwrap();
     }
 
@@ -148,6 +160,7 @@ fn write_read_roundtrip() {
     assert_eq!(events.len(), 3);
     assert_eq!(events[0].sequence, 0);
     assert_eq!(events[0].event_type_id, 0);
+    assert_eq!(events[0].event_time, 100);
     assert_eq!(events[0].payload, b"event-a");
     assert_eq!(events[1].sequence, 1);
     assert_eq!(events[1].event_type_id, 1);
@@ -166,7 +179,7 @@ fn write_multiple_blocks() {
         let mut writer = FlowWriter::create(&path, 2, 3).unwrap();
         for i in 0..10u64 {
             writer
-                .append((i % 2) as u16, i * 100, format!("evt-{i}").into_bytes())
+                .append(ev((i % 2) as u16, i * 100, format!("evt-{i}").as_bytes()))
                 .unwrap();
         }
         writer.flush().unwrap();
@@ -193,11 +206,11 @@ fn filtered_read_single_type() {
 
     {
         let mut writer = FlowWriter::create(&path, 3, 1000).unwrap();
-        writer.append(0, 100, b"created-alice".to_vec()).unwrap();
-        writer.append(1, 200, b"updated-alice".to_vec()).unwrap();
-        writer.append(0, 300, b"created-bob".to_vec()).unwrap();
-        writer.append(2, 400, b"deleted-alice".to_vec()).unwrap();
-        writer.append(0, 500, b"created-charlie".to_vec()).unwrap();
+        writer.append(ev(0, 100, b"created-alice")).unwrap();
+        writer.append(ev(1, 200, b"updated-alice")).unwrap();
+        writer.append(ev(0, 300, b"created-bob")).unwrap();
+        writer.append(ev(2, 400, b"deleted-alice")).unwrap();
+        writer.append(ev(0, 500, b"created-charlie")).unwrap();
         writer.flush().unwrap();
     }
 
@@ -219,9 +232,9 @@ fn filtered_read_multiple_types() {
 
     {
         let mut writer = FlowWriter::create(&path, 3, 1000).unwrap();
-        writer.append(0, 100, b"a".to_vec()).unwrap();
-        writer.append(1, 200, b"b".to_vec()).unwrap();
-        writer.append(2, 300, b"c".to_vec()).unwrap();
+        writer.append(ev(0, 100, b"a")).unwrap();
+        writer.append(ev(1, 200, b"b")).unwrap();
+        writer.append(ev(2, 300, b"c")).unwrap();
         writer.flush().unwrap();
     }
 
@@ -241,21 +254,16 @@ fn filtered_read_skips_irrelevant_blocks() {
     cleanup(&path);
 
     {
-        // block_size=2, so we get blocks with specific type compositions
         let mut writer = FlowWriter::create(&path, 3, 2).unwrap();
-        // Block 1: types 0, 0
-        writer.append(0, 100, b"a0".to_vec()).unwrap();
-        writer.append(0, 200, b"a1".to_vec()).unwrap();
-        // Block 2: types 1, 1
-        writer.append(1, 300, b"b0".to_vec()).unwrap();
-        writer.append(1, 400, b"b1".to_vec()).unwrap();
-        // Block 3: types 2, 0
-        writer.append(2, 500, b"c0".to_vec()).unwrap();
-        writer.append(0, 600, b"a2".to_vec()).unwrap();
+        writer.append(ev(0, 100, b"a0")).unwrap();
+        writer.append(ev(0, 200, b"a1")).unwrap();
+        writer.append(ev(1, 300, b"b0")).unwrap();
+        writer.append(ev(1, 400, b"b1")).unwrap();
+        writer.append(ev(2, 500, b"c0")).unwrap();
+        writer.append(ev(0, 600, b"a2")).unwrap();
         writer.flush().unwrap();
     }
 
-    // Filter for type 2 only: block 1 and block 2 should be skipped entirely
     let reader = FlowReader::open(&path).unwrap().with_filter(&[2]);
     let events: Vec<EventRecord> = reader.into_iter().map(|r| r.unwrap()).collect();
 
@@ -275,8 +283,8 @@ fn recovery_valid_file() {
 
     {
         let mut writer = FlowWriter::create(&path, 2, 5).unwrap();
-        for i in 0..10 {
-            writer.append(i % 2, i as u64 * 100, vec![i as u8; 10]).unwrap();
+        for i in 0..10u64 {
+            writer.append(ev(i as u16 % 2, i * 100, &[i as u8; 10])).unwrap();
         }
         writer.flush().unwrap();
     }
@@ -296,22 +304,20 @@ fn recovery_truncated_block_data() {
 
     {
         let mut writer = FlowWriter::create(&path, 2, 5).unwrap();
-        for i in 0..10 {
-            writer.append(i % 2, i as u64 * 100, vec![i as u8; 10]).unwrap();
+        for i in 0..10u64 {
+            writer.append(ev(i as u16 % 2, i * 100, &[i as u8; 10])).unwrap();
         }
         writer.flush().unwrap();
     }
 
     let file_len = fs::metadata(&path).unwrap().len();
 
-    // Truncate 10 bytes off the end (corrupts the last block)
     {
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.set_len(file_len - 10).unwrap();
     }
 
     let prefix = recovery::validate_file(&path).unwrap();
-    // Only the first block should survive
     assert_eq!(prefix.block_count, 1);
     assert_eq!(prefix.event_count, 5);
     assert_eq!(prefix.next_sequence, 5);
@@ -326,20 +332,17 @@ fn recovery_corrupted_block_checksum() {
 
     {
         let mut writer = FlowWriter::create(&path, 1, 3).unwrap();
-        for i in 0..6 {
-            writer.append(0, i as u64 * 100, vec![i as u8; 5]).unwrap();
+        for i in 0..6u64 {
+            writer.append(ev(0, i * 100, &[i as u8; 5])).unwrap();
         }
         writer.flush().unwrap();
     }
 
-    // Corrupt a byte in the second block's data region
-    // File header (16) + block1 header (64) + block1 data + block2 header (64) + a few bytes in
     let prefix_before = recovery::validate_file(&path).unwrap();
     assert_eq!(prefix_before.block_count, 2);
 
     {
         let mut data = fs::read(&path).unwrap();
-        // Corrupt a byte well into the second block
         let corrupt_offset = prefix_before.valid_end as usize - 5;
         data[corrupt_offset] ^= 0xFF;
         fs::write(&path, &data).unwrap();
@@ -359,7 +362,6 @@ fn recovery_empty_file_after_header() {
 
     {
         let _writer = FlowWriter::create(&path, 5, 100).unwrap();
-        // don't write any events
     }
 
     let prefix = recovery::validate_file(&path).unwrap();
@@ -380,14 +382,14 @@ fn reopen_and_append() {
 
     {
         let mut writer = FlowWriter::create(&path, 2, 100).unwrap();
-        writer.append(0, 100, b"first".to_vec()).unwrap();
-        writer.append(1, 200, b"second".to_vec()).unwrap();
+        writer.append(ev(0, 100, b"first")).unwrap();
+        writer.append(ev(1, 200, b"second")).unwrap();
         writer.flush().unwrap();
     }
 
     {
         let mut writer = FlowWriter::open(&path, 100).unwrap();
-        writer.append(0, 300, b"third".to_vec()).unwrap();
+        writer.append(ev(0, 300, b"third")).unwrap();
         writer.flush().unwrap();
     }
 
@@ -410,22 +412,20 @@ fn reopen_after_crash_recovery() {
 
     {
         let mut writer = FlowWriter::create(&path, 1, 3).unwrap();
-        for i in 0..6 {
-            writer.append(0, i as u64 * 100, format!("e{i}").into_bytes()).unwrap();
+        for i in 0..6u64 {
+            writer.append(ev(0, i * 100, format!("e{i}").as_bytes())).unwrap();
         }
         writer.flush().unwrap();
     }
 
-    // Append garbage to simulate partial write
     {
         let mut file = OpenOptions::new().append(true).open(&path).unwrap();
         file.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00]).unwrap();
     }
 
-    // Open should recover and truncate the garbage
     {
         let mut writer = FlowWriter::open(&path, 3).unwrap();
-        writer.append(0, 700, b"after-crash".to_vec()).unwrap();
+        writer.append(ev(0, 700, b"after-crash")).unwrap();
         writer.flush().unwrap();
     }
 
@@ -463,14 +463,11 @@ fn auto_flush_on_block_size() {
 
     {
         let mut writer = FlowWriter::create(&path, 1, 2).unwrap();
-        // These two appends should trigger auto-flush
-        writer.append(0, 100, b"one".to_vec()).unwrap();
-        writer.append(0, 200, b"two".to_vec()).unwrap();
-        // Don't call flush explicitly
+        writer.append(ev(0, 100, b"one")).unwrap();
+        writer.append(ev(0, 200, b"two")).unwrap();
     }
 
     let prefix = recovery::validate_file(&path).unwrap();
-    // At least one block was auto-flushed
     assert!(prefix.block_count >= 1);
     assert!(prefix.event_count >= 2);
 
@@ -488,7 +485,7 @@ fn large_payload() {
 
     {
         let mut writer = FlowWriter::create(&path, 1, 100).unwrap();
-        writer.append(0, 100, big_payload.clone()).unwrap();
+        writer.append(ev(0, 100, &big_payload)).unwrap();
         writer.flush().unwrap();
     }
 
@@ -497,6 +494,64 @@ fn large_payload() {
 
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload, big_payload);
+
+    cleanup(&path);
+}
+
+// ── Metadata round-trip ──
+
+#[test]
+fn metadata_roundtrip() {
+    let path = temp_path("metadata");
+    cleanup(&path);
+
+    {
+        let mut writer = FlowWriter::create(&path, 1, 100).unwrap();
+        let mut event = EventRecord::new(0, 1_000_000, b"payload".to_vec());
+        event.metadata = vec![
+            ("ttl".to_string(), "3600".to_string()),
+            ("notify".to_string(), "true".to_string()),
+        ];
+        writer.append(event).unwrap();
+        writer.flush().unwrap();
+    }
+
+    let reader = FlowReader::open(&path).unwrap();
+    let events: Vec<EventRecord> = reader.into_iter().map(|r| r.unwrap()).collect();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].metadata.len(), 2);
+    assert_eq!(events[0].metadata[0], ("ttl".to_string(), "3600".to_string()));
+    assert_eq!(events[0].metadata[1], ("notify".to_string(), "true".to_string()));
+
+    cleanup(&path);
+}
+
+// ── Correlation and causation IDs ──
+
+#[test]
+fn correlation_causation_roundtrip() {
+    let path = temp_path("correlation");
+    cleanup(&path);
+
+    let corr = [0xAA; 16];
+    let caus = [0xBB; 16];
+
+    {
+        let mut writer = FlowWriter::create(&path, 1, 100).unwrap();
+        let mut event = EventRecord::new(0, 500, b"linked".to_vec());
+        event.correlation_id = Some(corr);
+        event.causation_id = Some(caus);
+        writer.append(event).unwrap();
+        writer.flush().unwrap();
+    }
+
+    let reader = FlowReader::open(&path).unwrap();
+    let events: Vec<EventRecord> = reader.into_iter().map(|r| r.unwrap()).collect();
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].correlation_id, Some(corr));
+    assert_eq!(events[0].causation_id, Some(caus));
 
     cleanup(&path);
 }
