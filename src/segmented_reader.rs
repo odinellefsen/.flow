@@ -1,5 +1,8 @@
+use std::collections::HashMap;
 use std::io;
+use std::path::Path;
 
+use crate::compression;
 use crate::event::EventRecord;
 use crate::reader::FlowReader;
 use crate::store::{Cursor, FlowStore, SegmentInfo};
@@ -8,24 +11,30 @@ pub struct SegmentedReader {
     store: FlowStore,
     filter: Option<Vec<u16>>,
     start_cursor: Option<Cursor>,
+    /// Pre-loaded per-type Zstd dictionaries, shared across all segment readers.
+    dictionaries: HashMap<u16, Vec<u8>>,
 }
 
 impl SegmentedReader {
     pub fn open(dir: &str) -> io::Result<Self> {
         let store = FlowStore::open(dir)?;
+        let dictionaries = compression::load_dictionaries(store.dir())?;
         Ok(Self {
             store,
             filter: None,
             start_cursor: None,
+            dictionaries,
         })
     }
 
     pub fn open_from(dir: &str, cursor: Cursor) -> io::Result<Self> {
         let store = FlowStore::open(dir)?;
+        let dictionaries = compression::load_dictionaries(store.dir())?;
         Ok(Self {
             store,
             filter: None,
             start_cursor: Some(cursor),
+            dictionaries,
         })
     }
 
@@ -51,6 +60,7 @@ impl SegmentedReader {
             segment_index: 0,
             current_iter: None,
             filter_ids: self.filter,
+            dictionaries: self.dictionaries,
             start_cursor: self.start_cursor,
             cursor_applied: false,
             last_bucket_ms: 0,
@@ -65,6 +75,7 @@ pub struct SegmentedIterator {
     segment_index: usize,
     current_iter: Option<crate::reader::FlowIterator>,
     filter_ids: Option<Vec<u16>>,
+    dictionaries: HashMap<u16, Vec<u8>>,
     start_cursor: Option<Cursor>,
     cursor_applied: bool,
     last_bucket_ms: u64,
@@ -81,7 +92,9 @@ impl SegmentedIterator {
         let path = self.dir.join(&seg.file);
         let path_str = path.to_string_lossy().to_string();
 
-        let reader = FlowReader::open(&path_str)?;
+        let reader = FlowReader::open(&path_str)?
+            .with_dictionaries(self.dictionaries.clone());
+
         let reader = if let Some(ref ids) = self.filter_ids {
             reader.with_filter(ids)
         } else {
@@ -106,7 +119,6 @@ impl SegmentedIterator {
         Ok(true)
     }
 
-    /// Get a cursor representing the current read position.
     pub fn cursor(&self) -> Cursor {
         Cursor {
             segment_bucket_ms: self.last_bucket_ms,
@@ -144,4 +156,10 @@ impl Iterator for SegmentedIterator {
             }
         }
     }
+}
+
+/// Helper used by the compact operation and tests to load dictionaries from a
+/// specific directory (may differ from the store dir in tests).
+pub fn load_dicts_from(dir: &str) -> io::Result<HashMap<u16, Vec<u8>>> {
+    compression::load_dictionaries(Path::new(dir))
 }
