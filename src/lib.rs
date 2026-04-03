@@ -1,6 +1,7 @@
 pub mod format;
 pub mod event;
 pub mod block;
+pub mod compression;
 pub mod writer;
 pub mod reader;
 pub mod recovery;
@@ -17,4 +18,4 @@ pub use recovery::ValidPrefix;
 pub use store::{FlowStore, Cursor, EventTypeInfo, Manifest, SegmentInfo};
 pub use segmented_writer::SegmentedWriter;
 pub use segmented_reader::SegmentedReader;
-pub use operations::PurgeStats;
+pub use operations::{CompactOptions, CompactStats, PurgeStats};
