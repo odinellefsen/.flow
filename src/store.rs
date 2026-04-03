@@ -162,6 +162,11 @@ impl FlowStore {
         &self.manifest.segments
     }
 
+    /// Path to a per-event-type Zstd dictionary file in this flow type directory.
+    pub fn dict_path(&self, event_type_id: u16) -> std::path::PathBuf {
+        self.dir.join(crate::compression::dict_filename(event_type_id))
+    }
+
     /// Add or update a segment entry in the manifest.
     pub fn upsert_segment(&mut self, info: SegmentInfo) {
         if let Some(existing) = self
