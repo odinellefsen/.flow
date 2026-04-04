@@ -20,3 +20,4 @@ pub use store::{FlowStore, Cursor, EventTypeInfo, Manifest, SegmentInfo};
 pub use segmented_writer::SegmentedWriter;
 pub use segmented_reader::SegmentedReader;
 pub use operations::{CompactOptions, CompactStats, PurgeStats};
+pub use schema::{FieldType, PayloadSchema, SchemaError, SchemaField};
