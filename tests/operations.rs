@@ -1,7 +1,8 @@
 use std::fs;
 
 use dotflow::operations::{
-    delete_flow_type, purge_event_type, truncate_event_type, truncate_flow_type,
+    compact_flow_type, delete_flow_type, purge_event_type, truncate_event_type,
+    truncate_flow_type, CompactOptions,
 };
 use dotflow::event::EventRecord;
 use dotflow::{SegmentedReader, SegmentedWriter};
@@ -308,6 +309,110 @@ fn truncate_event_type_at_zero_removes_all() {
 
     let after = read_all(&dir);
     assert!(after.iter().all(|e| e.event_type_id != 1));
+
+    cleanup(&dir);
+}
+
+// ── Schema + operations compatibility ─────────────────────────────────────────
+
+fn write_schema_events(dir: &str, n: u64) {
+    let mut w = SegmentedWriter::create(dir, "food-item", 2, HOUR_MS, 50).unwrap();
+    for i in 0..n {
+        let et = (i % 2) as u16;
+        let payload = if et == 0 {
+            format!(r#"{{"id":"{i:036}","name":"item-{i}","price":{:.2}}}"#, i as f64 * 0.5 + 1.0)
+        } else {
+            format!(r#"{{"id":"{i:036}","active":true}}"#)
+        };
+        let mut ev = EventRecord::new(et, ts(i / (n / 4), i % (n / 4) * 1_000_000_000), payload.into_bytes());
+        ev.event_id = [i as u8; 16];
+        w.append(ev).unwrap();
+    }
+}
+
+#[test]
+fn purge_schema_encoded_event_type_preserves_others() {
+    let dir = test_dir("schema_purge");
+    cleanup(&dir);
+    write_schema_events(&dir, 40);
+
+    // Record type-1 payloads before purge
+    let before: Vec<_> = read_all(&dir)
+        .into_iter()
+        .filter(|e| e.event_type_id == 1)
+        .collect();
+    assert!(!before.is_empty());
+
+    purge_event_type(&dir, 0).unwrap();
+
+    let after = read_all(&dir);
+    // Type 0 must be gone
+    assert!(after.iter().all(|e| e.event_type_id != 0));
+    // Type 1 must survive and payload must still be valid JSON
+    let type1_after: Vec<_> = after.into_iter().filter(|e| e.event_type_id == 1).collect();
+    assert_eq!(before.len(), type1_after.len());
+    for ev in &type1_after {
+        let val: serde_json::Value = serde_json::from_slice(&ev.payload)
+            .expect("payload must be valid JSON after purge");
+        assert!(val.get("id").is_some(), "id field must be present");
+    }
+
+    cleanup(&dir);
+}
+
+#[test]
+fn compact_schema_encoded_achieves_better_compression() {
+    let dir = test_dir("schema_compact");
+    cleanup(&dir);
+
+    // Write 200 events with realistic JSON payloads
+    {
+        let mut w = SegmentedWriter::create(&dir, "food-item", 1, HOUR_MS, 50).unwrap();
+        for i in 0u64..200 {
+            let payload = format!(
+                r#"{{"id":"{i:036}","userId":"user_{i:020}","name":"Item {i}","price":{:.2},"available":true}}"#,
+                i as f64 * 0.5 + 1.0
+            );
+            let mut ev = EventRecord::new(0, ts(0, i * 60_000_000), payload.into_bytes());
+            ev.event_id = [i as u8; 16];
+            w.append(ev).unwrap();
+        }
+    }
+
+    // Measure size before compact
+    let before_size: u64 = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|x| x == "flow").unwrap_or(false))
+        .map(|e| e.metadata().unwrap().len())
+        .sum();
+
+    // Compact with dictionary training
+    let stats = compact_flow_type(&dir, CompactOptions { train_dicts: true, level: 3, dict_size: 32_768 })
+        .unwrap();
+
+    let after_size: u64 = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|x| x == "flow").unwrap_or(false))
+        .map(|e| e.metadata().unwrap().len())
+        .sum();
+
+    assert!(
+        after_size < before_size,
+        "compact should reduce size: before={before_size}, after={after_size}"
+    );
+    assert!(stats.blocks_compressed > 0, "at least some blocks should be compressed");
+
+    // Read back -- all events must still decode correctly
+    let events = read_all(&dir);
+    assert_eq!(events.len(), 200);
+    for ev in &events {
+        let val: serde_json::Value = serde_json::from_slice(&ev.payload)
+            .expect("payload must be valid JSON after compact");
+        assert!(val.get("id").is_some());
+        assert!(val.get("price").is_some());
+    }
 
     cleanup(&dir);
 }
