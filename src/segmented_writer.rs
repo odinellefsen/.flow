@@ -143,6 +143,10 @@ impl SegmentedWriter {
         &self.store
     }
 
+    pub fn store_mut(&mut self) -> &mut FlowStore {
+        &mut self.store
+    }
+
     pub fn next_sequence(&self) -> u64 {
         self.current_writer
             .as_ref()
