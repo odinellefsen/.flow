@@ -283,7 +283,13 @@ fn decode_value(buf: &[u8], ft: &FieldType) -> Result<(Value, usize), SchemaErro
                 return Err(SchemaError::EncodeError("truncated number".into()));
             }
             let f = f64::from_le_bytes(buf[0..8].try_into().unwrap());
-            Ok((serde_json::Number::from_f64(f).map(Value::Number).unwrap_or(Value::Null), 8))
+            // Preserve integer representation when the number is whole
+            let num = if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+                serde_json::Number::from(f as i64)
+            } else {
+                serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0i64))
+            };
+            Ok((Value::Number(num), 8))
         }
         FieldType::Boolean => {
             if buf.is_empty() {
