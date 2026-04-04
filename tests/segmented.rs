@@ -1,7 +1,6 @@
 use std::fs;
 
 use dotflow::event::EventRecord;
-use dotflow::schema::PayloadSchema;
 use dotflow::{Cursor, FlowStore, SegmentedReader, SegmentedWriter};
 
 const HOUR_MS: u64 = 3_600_000;
@@ -468,6 +467,195 @@ fn event_type_registry_persists() {
     assert_eq!(store2.event_type_name(1), Some("food-item.updated.v0"));
     assert_eq!(store2.event_type_name(2), Some("food-item.deleted.v0"));
     assert_eq!(store2.event_type_name(99), None);
+
+    cleanup(&dir);
+}
+
+// ── Schema-aware encode/decode integration ────────────────────────────────────
+
+#[test]
+fn schema_locked_on_first_event_and_persisted() {
+    let dir = test_dir("schema_lock_persist");
+
+    let payload = br#"{"id":"abc-123","name":"Burger","price":9.99}"#;
+    {
+        let mut w = SegmentedWriter::create(&dir, "food-item", 1, HOUR_MS, 50).unwrap();
+        let mut event = EventRecord::new(0, 0, payload.to_vec());
+        event.event_id = [1u8; 16];
+        w.append(event).unwrap();
+    }
+
+    // Schema must be locked in the manifest after the write
+    let store = FlowStore::open(&dir).unwrap();
+    let schema = store.get_schema(0).expect("schema must be locked");
+    let field_names: Vec<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+    // All three keys must appear (order is alphabetical from serde_json::Map)
+    assert!(field_names.contains(&"id"));
+    assert!(field_names.contains(&"name"));
+    assert!(field_names.contains(&"price"));
+
+    cleanup(&dir);
+}
+
+#[test]
+fn schema_encoded_payload_roundtrips_through_reader() {
+    let dir = test_dir("schema_roundtrip");
+
+    let payloads: Vec<&[u8]> = vec![
+        br#"{"id":"aaa","name":"Burger","price":9.99}"#,
+        br#"{"id":"bbb","name":"Fries","price":3.49}"#,
+        br#"{"id":"ccc","name":"Shake","price":4.99}"#,
+    ];
+
+    {
+        let mut w = SegmentedWriter::create(&dir, "food-item", 1, HOUR_MS, 50).unwrap();
+        for (i, &p) in payloads.iter().enumerate() {
+            let mut event = EventRecord::new(0, i as u64 * 1_000_000, p.to_vec());
+            event.event_id = [i as u8 + 1; 16];
+            w.append(event).unwrap();
+        }
+    }
+
+    // All events must decode back to original JSON
+    let reader = SegmentedReader::open(&dir).unwrap();
+    let events: Vec<_> = reader.into_iter().map(|r| r.unwrap().0).collect();
+
+    assert_eq!(events.len(), 3);
+    for (event, &original_payload) in events.iter().zip(payloads.iter()) {
+        let original: serde_json::Value = serde_json::from_slice(original_payload).unwrap();
+        let recovered: serde_json::Value = serde_json::from_slice(&event.payload).unwrap();
+        assert_eq!(original, recovered, "payload mismatch for event {}", event.sequence);
+        assert_eq!(event.payload_codec, 0, "payload_codec should be reset to raw after decode");
+    }
+
+    cleanup(&dir);
+}
+
+#[test]
+fn schema_encoded_payload_is_smaller_on_disk() {
+    let dir_raw = test_dir("schema_size_raw");
+    let dir_schema = test_dir("schema_size_schema");
+
+    let payload = br#"{"id":"a4a41742-16f4-4a7e-9cb5-e0048d207a2c","userId":"user_30eqFgTWfuBysprgdMgwvjEezH2","name":"Burger","categoryHierarchy":["Fast Food","American","Burgers"]}"#;
+
+    let n = 200u64;
+
+    // Write raw (no schema): use FlowStore with no auto-locking by writing
+    // raw bytes directly via low-level writer
+    {
+        use dotflow::FlowWriter;
+        FlowStore::create(&dir_raw, "food-item", 1, HOUR_MS).unwrap();
+        let path = format!("{dir_raw}/seg_0.flow");
+        let mut w = FlowWriter::create(&path, 0, 1000).unwrap();
+        for i in 0..n {
+            let mut event = EventRecord::new(0, i * 1_000_000, payload.to_vec());
+            event.event_id = [i as u8; 16];
+            w.append(event).unwrap();
+        }
+    }
+
+    // Write schema-encoded via SegmentedWriter
+    {
+        let mut w = SegmentedWriter::create(&dir_schema, "food-item", 1, HOUR_MS, 50).unwrap();
+        for i in 0..n {
+            let mut event = EventRecord::new(0, i * 1_000_000, payload.to_vec());
+            event.event_id = [i as u8; 16];
+            w.append(event).unwrap();
+        }
+    }
+
+    let raw_size: u64 = fs::read_dir(&dir_raw)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|x| x == "flow").unwrap_or(false))
+        .map(|e| e.metadata().unwrap().len())
+        .sum();
+
+    let schema_size: u64 = fs::read_dir(&dir_schema)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map(|x| x == "flow").unwrap_or(false))
+        .map(|e| e.metadata().unwrap().len())
+        .sum();
+
+    assert!(
+        schema_size < raw_size,
+        "schema-encoded ({schema_size} bytes) should be smaller than raw ({raw_size} bytes)"
+    );
+
+    cleanup(&dir_raw);
+    cleanup(&dir_schema);
+}
+
+#[test]
+fn schema_validation_rejects_extra_fields() {
+    let dir = test_dir("schema_validation");
+
+    let first_payload = br#"{"id":"abc","name":"Burger"}"#;
+    let bad_payload = br#"{"id":"def","name":"Fries","extra":"surprise"}"#;
+
+    let mut w = SegmentedWriter::create(&dir, "food-item", 1, HOUR_MS, 50).unwrap();
+
+    // First event locks schema {id, name}
+    let mut e1 = EventRecord::new(0, 0, first_payload.to_vec());
+    e1.event_id = [1u8; 16];
+    w.append(e1).unwrap();
+
+    // Second event has an extra field -- must be rejected
+    let mut e2 = EventRecord::new(0, 1_000_000, bad_payload.to_vec());
+    e2.event_id = [2u8; 16];
+    let result = w.append(e2);
+    assert!(result.is_err(), "extra field should be rejected after schema is locked");
+
+    cleanup(&dir);
+}
+
+#[test]
+fn schema_allows_null_for_locked_fields() {
+    let dir = test_dir("schema_null_field");
+
+    let first_payload = br#"{"id":"abc","note":"hello"}"#;
+    let null_payload = br#"{"id":"def","note":null}"#;
+
+    let mut w = SegmentedWriter::create(&dir, "food-item", 1, HOUR_MS, 50).unwrap();
+
+    let mut e1 = EventRecord::new(0, 0, first_payload.to_vec());
+    e1.event_id = [1u8; 16];
+    w.append(e1).unwrap();
+
+    // Null is allowed for any field
+    let mut e2 = EventRecord::new(0, 1_000_000, null_payload.to_vec());
+    e2.event_id = [2u8; 16];
+    w.append(e2).unwrap();
+
+    drop(w);
+
+    // Read back and verify null is preserved
+    let reader = SegmentedReader::open(&dir).unwrap();
+    let events: Vec<_> = reader.into_iter().map(|r| r.unwrap().0).collect();
+    assert_eq!(events.len(), 2);
+
+    let recovered: serde_json::Value = serde_json::from_slice(&events[1].payload).unwrap();
+    assert!(recovered["note"].is_null());
+
+    cleanup(&dir);
+}
+
+#[test]
+fn schema_not_locked_for_non_json_payload() {
+    let dir = test_dir("schema_non_json");
+
+    let mut w = SegmentedWriter::create(&dir, "binary-data", 1, HOUR_MS, 50).unwrap();
+
+    // Non-JSON payload -- should be stored raw without locking
+    let mut e = EventRecord::new(0, 0, b"\x00\x01\x02\x03binary".to_vec());
+    e.event_id = [1u8; 16];
+    w.append(e).unwrap();
+
+    drop(w);
+
+    let store = FlowStore::open(&dir).unwrap();
+    assert!(store.get_schema(0).is_none(), "non-JSON payload must not lock a schema");
 
     cleanup(&dir);
 }
