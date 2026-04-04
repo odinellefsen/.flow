@@ -2,6 +2,7 @@ pub mod format;
 pub mod event;
 pub mod block;
 pub mod compression;
+pub mod schema;
 pub mod writer;
 pub mod reader;
 pub mod recovery;
