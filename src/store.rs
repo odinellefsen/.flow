@@ -4,10 +4,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::schema::PayloadSchema;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventTypeInfo {
     pub id: u16,
     pub name: String,
+    /// Locked payload schema, derived from the first event of this type.
+    /// None = schema not yet locked (raw JSON stored as-is).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<PayloadSchema>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,8 +75,32 @@ impl FlowStore {
         Ok(store)
     }
 
+    /// Return the locked schema for an event type, if one exists.
+    pub fn get_schema(&self, id: u16) -> Option<&PayloadSchema> {
+        self.manifest
+            .event_types
+            .iter()
+            .find(|e| e.id == id)
+            .and_then(|e| e.schema.as_ref())
+    }
+
+    /// Lock the schema for an event type. If the type is not yet registered,
+    /// it is registered with an empty name first.
+    pub fn lock_schema(&mut self, id: u16, schema: PayloadSchema) {
+        if let Some(existing) = self.manifest.event_types.iter_mut().find(|e| e.id == id) {
+            existing.schema = Some(schema);
+        } else {
+            self.manifest.event_types.push(EventTypeInfo {
+                id,
+                name: String::new(),
+                schema: Some(schema),
+            });
+            self.manifest.event_types.sort_by_key(|e| e.id);
+        }
+    }
+
     /// Register a human-readable name for an event type ID.
-    /// Overwrites if the ID already exists.
+    /// Overwrites the name but preserves any existing locked schema.
     pub fn register_event_type(&mut self, id: u16, name: &str) {
         if let Some(existing) = self.manifest.event_types.iter_mut().find(|e| e.id == id) {
             existing.name = name.to_string();
@@ -78,6 +108,7 @@ impl FlowStore {
             self.manifest.event_types.push(EventTypeInfo {
                 id,
                 name: name.to_string(),
+                schema: None,
             });
             self.manifest.event_types.sort_by_key(|e| e.id);
         }
