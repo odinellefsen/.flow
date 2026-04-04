@@ -1,6 +1,7 @@
 use std::fs;
 
 use dotflow::event::EventRecord;
+use dotflow::schema::PayloadSchema;
 use dotflow::{Cursor, FlowStore, SegmentedReader, SegmentedWriter};
 
 const HOUR_MS: u64 = 3_600_000;
