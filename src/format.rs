@@ -12,6 +12,14 @@ pub const EVENT_RECORD_MIN_SIZE: usize = 61;
 
 pub const FLAG_HAS_CORRELATION_ID: u8 = 1 << 0;
 pub const FLAG_HAS_CAUSATION_ID: u8 = 1 << 1;
+/// Bits 2-3 of the flags byte encode the payload codec.
+pub const FLAG_PAYLOAD_CODEC_MASK: u8 = 0b0000_1100;
+pub const FLAG_PAYLOAD_CODEC_SHIFT: u8 = 2;
+
+/// Payload is raw bytes (default -- no schema encoding).
+pub const PAYLOAD_CODEC_RAW: u8 = 0;
+/// Payload is schema-encoded value-only binary (requires schema from manifest to decode).
+pub const PAYLOAD_CODEC_SCHEMA: u8 = 1;
 
 pub fn crc32c(data: &[u8]) -> u32 {
     crc32c::crc32c(data)

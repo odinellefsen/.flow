@@ -1,4 +1,7 @@
-use crate::format::{self, FLAG_HAS_CAUSATION_ID, FLAG_HAS_CORRELATION_ID};
+use crate::format::{
+    self, FLAG_HAS_CAUSATION_ID, FLAG_HAS_CORRELATION_ID, FLAG_PAYLOAD_CODEC_MASK,
+    FLAG_PAYLOAD_CODEC_SHIFT, PAYLOAD_CODEC_RAW,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventRecord {
@@ -20,7 +23,10 @@ pub struct EventRecord {
     pub causation_id: Option<[u8; 16]>,
     /// System-level key-value metadata (e.g. TTL, sensitivity flags).
     pub metadata: Vec<(String, String)>,
-    /// User-defined payload (opaque bytes -- JSON, protobuf, msgpack, etc.).
+    /// How the payload bytes are encoded.
+    /// PAYLOAD_CODEC_RAW = raw bytes; PAYLOAD_CODEC_SCHEMA = value-only binary.
+    pub payload_codec: u8,
+    /// User-defined payload bytes. Interpretation depends on `payload_codec`.
     pub payload: Vec<u8>,
 }
 
@@ -38,6 +44,7 @@ impl EventRecord {
             correlation_id: None,
             causation_id: None,
             metadata: Vec::new(),
+            payload_codec: PAYLOAD_CODEC_RAW,
             payload,
         }
     }
@@ -65,6 +72,7 @@ impl EventRecord {
         if self.causation_id.is_some() {
             flags |= FLAG_HAS_CAUSATION_ID;
         }
+        flags |= (self.payload_codec << FLAG_PAYLOAD_CODEC_SHIFT) & FLAG_PAYLOAD_CODEC_MASK;
         buf.push(flags);
 
         if let Some(ref id) = self.correlation_id {
@@ -122,6 +130,7 @@ impl EventRecord {
         }
         let flags = data[pos];
         pos += 1;
+        let payload_codec = (flags & FLAG_PAYLOAD_CODEC_MASK) >> FLAG_PAYLOAD_CODEC_SHIFT;
 
         let correlation_id = if flags & FLAG_HAS_CORRELATION_ID != 0 {
             if data.len() < pos + 16 {
@@ -212,6 +221,7 @@ impl EventRecord {
                 correlation_id,
                 causation_id,
                 metadata,
+                payload_codec,
                 payload,
             },
             pos,
