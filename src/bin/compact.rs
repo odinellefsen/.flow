@@ -2,6 +2,7 @@ use std::io;
 use std::time::Instant;
 
 use dotflow::operations::{compact_flow_type, CompactOptions};
+use dotflow::FlowStore;
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
@@ -33,6 +34,25 @@ fn main() -> io::Result<()> {
         "  Level: {}  |  Train dicts: {}",
         options.level, options.train_dicts
     );
+
+    // Show schema status before compacting
+    if let Ok(store) = FlowStore::open(&args.dir) {
+        let schema_locked: Vec<_> = store
+            .manifest
+            .event_types
+            .iter()
+            .filter(|e| e.schema.is_some())
+            .collect();
+        if !schema_locked.is_empty() {
+            eprintln!(
+                "  Schema-locked types: {} ({} types -- payloads are value-only encoded)",
+                schema_locked.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join(", "),
+                schema_locked.len()
+            );
+        } else {
+            eprintln!("  No locked schemas -- payloads stored as raw bytes");
+        }
+    }
     eprintln!();
 
     let start = Instant::now();
