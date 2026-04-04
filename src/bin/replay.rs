@@ -1,18 +1,18 @@
 use std::io::{self, Write};
 use std::time::Instant;
 
-use dotflow::{Cursor, SegmentedReader};
+use dotflow::{Cursor, FlowStore, SegmentedReader};
 
 const DIR: &str = "benchmark.flowtype";
 
-const TYPE_NAMES: &[&str] = &["user.created", "email.updated", "user.deleted"];
-
-fn type_name(id: u16) -> &'static str {
-    TYPE_NAMES.get(id as usize).copied().unwrap_or("unknown")
+fn type_name<'a>(store: &'a FlowStore, id: u16) -> &'a str {
+    store.event_type_name(id).unwrap_or("unknown")
 }
 
 fn main() -> io::Result<()> {
     let args = Args::parse();
+
+    let store = FlowStore::open(DIR)?;
 
     let reader = if let Some(ref cursor) = args.from_cursor {
         eprintln!(
@@ -25,13 +25,19 @@ fn main() -> io::Result<()> {
     };
 
     let reader = if let Some(ref ids) = args.filter {
-        let names: Vec<&str> = ids.iter().map(|id| type_name(*id)).collect();
+        let names: Vec<&str> = ids.iter().map(|id| type_name(&store, *id)).collect();
         eprintln!("Filter active: types {:?} ({:?})", ids, names);
         reader.with_filter(ids)
     } else {
         eprintln!("No filter -- replaying all event types");
         reader
     };
+
+    // Print locked schemas so the user knows what they'll see
+    let locked_count = store.manifest.event_types.iter().filter(|e| e.schema.is_some()).count();
+    if locked_count > 0 {
+        eprintln!("{locked_count} event types with locked schema (payloads decoded to JSON transparently)");
+    }
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -44,12 +50,15 @@ fn main() -> io::Result<()> {
     for result in reader.into_iter() {
         let (event, cursor) = result?;
         let payload = String::from_utf8_lossy(&event.payload);
+        let type_label = store
+            .event_type_name(event.event_type_id)
+            .unwrap_or("unknown");
 
         writeln!(
             out,
-            "[seq={:>7}] {:<15} {}",
+            "[seq={:>7}] {:<28} {}",
             event.sequence,
-            type_name(event.event_type_id),
+            type_label,
             payload,
         )?;
 
