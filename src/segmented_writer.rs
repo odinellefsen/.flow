@@ -2,7 +2,9 @@ use std::fs;
 use std::io;
 
 use crate::event::EventRecord;
+use crate::format::PAYLOAD_CODEC_SCHEMA;
 use crate::recovery;
+use crate::schema::PayloadSchema;
 use crate::store::{FlowStore, SegmentInfo};
 use crate::writer::FlowWriter;
 
@@ -74,16 +76,58 @@ impl SegmentedWriter {
 
     /// Append an event. The bucket is determined from `event.event_time`.
     /// The event's sequence field is assigned by the underlying writer.
-    pub fn append(&mut self, event: EventRecord) -> io::Result<u64> {
+    ///
+    /// If the event type has no locked schema yet and the payload is non-empty,
+    /// its schema is inferred from this event and locked in the manifest.
+    /// All subsequent events of the same type are validated and schema-encoded.
+    pub fn append(&mut self, mut event: EventRecord) -> io::Result<u64> {
         let bucket = self.store.bucket_for_timestamp(event.event_time);
 
         if self.current_writer.is_none() || bucket != self.current_bucket_ms {
             self.rotate_to_bucket(bucket)?;
         }
 
+        event = self.apply_schema(event)?;
+
         let seq = self.current_writer.as_mut().unwrap().append(event)?;
         self.segment_event_count += 1;
         Ok(seq)
+    }
+
+    fn apply_schema(&mut self, mut event: EventRecord) -> io::Result<EventRecord> {
+        if event.payload.is_empty() {
+            return Ok(event);
+        }
+
+        let type_id = event.event_type_id;
+
+        if self.store.get_schema(type_id).is_none() {
+            // First event of this type -- infer and lock schema
+            match PayloadSchema::infer(&event.payload) {
+                Ok(schema) => {
+                    self.store.lock_schema(type_id, schema);
+                    self.store.save_manifest()?;
+                }
+                Err(_) => {
+                    // Non-JSON payload or inference failed -- store raw
+                    return Ok(event);
+                }
+            }
+        }
+
+        // Schema is locked -- validate and encode
+        if let Some(schema) = self.store.get_schema(type_id) {
+            let schema = schema.clone();
+            schema
+                .validate(&event.payload)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+            event.payload = schema
+                .encode_payload(&event.payload)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            event.payload_codec = PAYLOAD_CODEC_SCHEMA;
+        }
+
+        Ok(event)
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
