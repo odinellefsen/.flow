@@ -23,8 +23,15 @@ path = "src/bin/benchmark.rs"
 name = "compact"
 path = "src/bin/compact.rs"
 
+[[bin]]
+name = "http_bench"
+path = "src/bin/http_bench.rs"
+
 [dependencies]
 crc32c = "0.6.8"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 zstd = "0.13"
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json"] }
