@@ -57,7 +57,7 @@ impl FlowStore {
     ) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
 
-        let manifest = Manifest {
+        let mut manifest = Manifest {
             flow_type: flow_type.to_string(),
             version: 1,
             event_type_count,
@@ -65,6 +65,7 @@ impl FlowStore {
             event_types: Vec::new(),
             segments: Vec::new(),
         };
+        ensure_event_type_registry(&mut manifest);
 
         let store = Self {
             dir: PathBuf::from(dir),
@@ -84,18 +85,25 @@ impl FlowStore {
             .and_then(|e| e.schema.as_ref())
     }
 
-    /// Lock the schema for an event type. If the type is not yet registered,
-    /// it is registered with an empty name first.
-    pub fn lock_schema(&mut self, id: u16, schema: PayloadSchema) {
+    /// Whether this event type ID is part of this flow type registry.
+    pub fn has_event_type(&self, id: u16) -> bool {
+        self.manifest.event_types.iter().any(|e| e.id == id)
+    }
+
+    /// Lock the schema for an event type.
+    /// The event type must already be registered in the flow type.
+    pub fn lock_schema(&mut self, id: u16, schema: PayloadSchema) -> io::Result<()> {
         if let Some(existing) = self.manifest.event_types.iter_mut().find(|e| e.id == id) {
             existing.schema = Some(schema);
+            Ok(())
         } else {
-            self.manifest.event_types.push(EventTypeInfo {
-                id,
-                name: String::new(),
-                schema: Some(schema),
-            });
-            self.manifest.event_types.sort_by_key(|e| e.id);
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unknown event_type_id {} (known range: 0..{})",
+                    id, self.manifest.event_type_count
+                ),
+            ))
         }
     }
 
@@ -132,8 +140,9 @@ impl FlowStore {
                 format!("failed to read manifest at {}: {}", manifest_path.display(), e),
             )
         })?;
-        let manifest: Manifest = serde_json::from_str(&data)
+        let mut manifest: Manifest = serde_json::from_str(&data)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        ensure_event_type_registry(&mut manifest);
 
         Ok(Self { dir, manifest })
     }
@@ -228,4 +237,19 @@ impl FlowStore {
     pub fn latest_segment(&self) -> Option<&SegmentInfo> {
         self.manifest.segments.last()
     }
+}
+
+fn ensure_event_type_registry(manifest: &mut Manifest) {
+    // Ensure old manifests (without explicit event_types) still have a strict
+    // registry based on event_type_count.
+    for id in 0..manifest.event_type_count {
+        if manifest.event_types.iter().all(|e| e.id != id) {
+            manifest.event_types.push(EventTypeInfo {
+                id,
+                name: String::new(),
+                schema: None,
+            });
+        }
+    }
+    manifest.event_types.sort_by_key(|e| e.id);
 }
