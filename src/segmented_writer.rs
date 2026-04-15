@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::collections::HashMap;
 
 use crate::event::EventRecord;
 use crate::format::PAYLOAD_CODEC_SCHEMA;
@@ -10,6 +11,8 @@ use crate::writer::FlowWriter;
 
 pub struct SegmentedWriter {
     store: FlowStore,
+    /// Fast in-memory cache of locked schemas by event_type_id.
+    schema_cache: HashMap<u16, PayloadSchema>,
     current_writer: Option<FlowWriter>,
     current_bucket_ms: u64,
     /// Last known next_sequence when there is no active writer.
@@ -30,6 +33,7 @@ impl SegmentedWriter {
         let store = FlowStore::create(dir, flow_type, event_type_count, bucket_duration_ms)?;
 
         Ok(Self {
+            schema_cache: load_schema_cache(&store),
             store,
             current_writer: None,
             current_bucket_ms: 0,
@@ -64,6 +68,7 @@ impl SegmentedWriter {
             };
 
         Ok(Self {
+            schema_cache: load_schema_cache(&store),
             store,
             current_writer,
             current_bucket_ms,
@@ -95,17 +100,34 @@ impl SegmentedWriter {
     }
 
     fn apply_schema(&mut self, mut event: EventRecord) -> io::Result<EventRecord> {
+        let type_id = event.event_type_id;
+        if !self.store.has_event_type(type_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "unknown event_type_id {} (create/register event type first)",
+                    type_id
+                ),
+            ));
+        }
+
         if event.payload.is_empty() {
             return Ok(event);
         }
 
-        let type_id = event.event_type_id;
+        if !self.schema_cache.contains_key(&type_id) {
+            // If schema was mutated externally through store_mut, refresh lazily.
+            if let Some(existing) = self.store.get_schema(type_id).cloned() {
+                self.schema_cache.insert(type_id, existing);
+            }
+        }
 
-        if self.store.get_schema(type_id).is_none() {
+        if !self.schema_cache.contains_key(&type_id) {
             // First event of this type -- infer and lock schema
             match PayloadSchema::infer(&event.payload) {
                 Ok(schema) => {
-                    self.store.lock_schema(type_id, schema);
+                    self.store.lock_schema(type_id, schema.clone())?;
+                    self.schema_cache.insert(type_id, schema);
                     self.store.save_manifest()?;
                 }
                 Err(_) => {
@@ -116,8 +138,7 @@ impl SegmentedWriter {
         }
 
         // Schema is locked -- validate and encode
-        if let Some(schema) = self.store.get_schema(type_id) {
-            let schema = schema.clone();
+        if let Some(schema) = self.schema_cache.get(&type_id) {
             schema
                 .validate(&event.payload)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
@@ -210,6 +231,15 @@ impl SegmentedWriter {
 
         Ok(())
     }
+}
+
+fn load_schema_cache(store: &FlowStore) -> HashMap<u16, PayloadSchema> {
+    store
+        .manifest
+        .event_types
+        .iter()
+        .filter_map(|e| e.schema.as_ref().map(|s| (e.id, s.clone())))
+        .collect()
 }
 
 impl Drop for SegmentedWriter {
