@@ -659,3 +659,21 @@ fn schema_not_locked_for_non_json_payload() {
 
     cleanup(&dir);
 }
+
+#[test]
+fn append_rejects_unknown_event_type_id() {
+    let dir = test_dir("unknown_event_type");
+    cleanup(&dir);
+
+    let mut w = SegmentedWriter::create(&dir, "food-item", 1, HOUR_MS, 50).unwrap();
+    let mut e = EventRecord::new(1, 0, br#"{"id":"x"}"#.to_vec());
+    e.event_id = [1u8; 16];
+    let err = w.append(e).unwrap_err();
+    assert!(
+        err.to_string().contains("unknown event_type_id"),
+        "unexpected error: {}",
+        err
+    );
+
+    cleanup(&dir);
+}
