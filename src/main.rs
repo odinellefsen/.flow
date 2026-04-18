@@ -84,7 +84,6 @@ fn main() -> io::Result<()> {
         );
     }
 
-    // --- Recovery info ---
     println!("\n=== Recovery validation ===");
     let prefix = recovery::validate_file(PATH)?;
     println!("  Valid blocks: {}", prefix.block_count);
@@ -92,7 +91,6 @@ fn main() -> io::Result<()> {
     println!("  Next sequence: {}", prefix.next_sequence);
     println!("  Valid end byte: {}", prefix.valid_end);
 
-    // --- Reopen and append ---
     println!("\n=== Reopen and append ===");
     let mut writer = FlowWriter::open(PATH, 4)?;
     let mut new_event = EventRecord::new(
