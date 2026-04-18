@@ -19,18 +19,41 @@ fn now_nanos() -> u64 {
 }
 
 fn main() -> io::Result<()> {
-    // --- Write ---
     println!("=== Writing events ===");
     let mut writer = FlowWriter::create(PATH, 3, 4)?;
 
-    let s0 = writer.append(EventRecord::new(EVENT_USER_CREATED, now_nanos(), b"alice".to_vec()))?;
-    writer.append(EventRecord::new(EVENT_EMAIL_UPDATED, now_nanos(), b"alice@new.com".to_vec()))?;
-    writer.append(EventRecord::new(EVENT_USER_CREATED, now_nanos(), b"bob".to_vec()))?;
-    writer.append(EventRecord::new(EVENT_USER_DELETED, now_nanos(), b"alice".to_vec()))?;
+    let s0 = writer.append(EventRecord::new(
+        EVENT_USER_CREATED,
+        now_nanos(),
+        b"alice".to_vec(),
+    ))?;
+    writer.append(EventRecord::new(
+        EVENT_EMAIL_UPDATED,
+        now_nanos(),
+        b"alice@new.com".to_vec(),
+    ))?;
+    writer.append(EventRecord::new(
+        EVENT_USER_CREATED,
+        now_nanos(),
+        b"bob".to_vec(),
+    ))?;
+    writer.append(EventRecord::new(
+        EVENT_USER_DELETED,
+        now_nanos(),
+        b"alice".to_vec(),
+    ))?;
     // block_size=4, so the above 4 events auto-flush as block 1
 
-    writer.append(EventRecord::new(EVENT_USER_CREATED, now_nanos(), b"charlie".to_vec()))?;
-    let s5 = writer.append(EventRecord::new(EVENT_EMAIL_UPDATED, now_nanos(), b"bob@new.com".to_vec()))?;
+    writer.append(EventRecord::new(
+        EVENT_USER_CREATED,
+        now_nanos(),
+        b"charlie".to_vec(),
+    ))?;
+    let s5 = writer.append(EventRecord::new(
+        EVENT_EMAIL_UPDATED,
+        now_nanos(),
+        b"bob@new.com".to_vec(),
+    ))?;
     writer.flush()?; // explicit flush for the remaining 2 events as block 2
 
     println!("Wrote 6 events (seq {s0}..{s5})");
@@ -72,7 +95,11 @@ fn main() -> io::Result<()> {
     // --- Reopen and append ---
     println!("\n=== Reopen and append ===");
     let mut writer = FlowWriter::open(PATH, 4)?;
-    let mut new_event = EventRecord::new(EVENT_EMAIL_UPDATED, now_nanos(), b"charlie@new.com".to_vec());
+    let mut new_event = EventRecord::new(
+        EVENT_EMAIL_UPDATED,
+        now_nanos(),
+        b"charlie@new.com".to_vec(),
+    );
     new_event.metadata = vec![
         ("producer/name".to_string(), "demo".to_string()),
         ("notify-on/stored-event".to_string(), "true".to_string()),
